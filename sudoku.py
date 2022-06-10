@@ -13,12 +13,14 @@ Created on Sat Jan  1 22:24:35 2022
 
 import numpy as np
 import scipy.optimize
+import time
 
 class cell:
     def __init__(self,i,j,value):
         self.i = i
         self.j = j
         self.value = value
+        self.pos = (self.i, self.j)
         if value == 0:
             self.possible_vals = set([i for i in range(1,10)])
             self.not_possible_vals = set()
@@ -31,9 +33,14 @@ class cell:
         j_box_val = j//3
         self.box_number = int(3*i_box_val+j_box_val)
 
+
     def reset(self):
-        self.possible_vals = set([self.value])
-        self.not_possible_vals = set([i for i in range(1,10)])-self.possible_vals
+        if self.value == 0:
+            self.possible_vals = set([i for i in range(1,10)])
+            self.not_possible_vals = set()
+        else:
+            self.possible_vals = set([self.value])
+            self.not_possible_vals = set([i for i in range(1,10)])-self.possible_vals
 
 
     def is_not(self,value):
@@ -54,6 +61,18 @@ class cell:
         diff_vals = self.possible_vals-other_set
         return diff_vals
 
+# Summarises the most properties for checkpoints
+class checkpoint:
+    def __init__(self, board, route, cell_position):
+        self.values = []
+        for i in range(9):
+            for j in range(9):
+                cell = board[i][j]
+                self.values.append(cell.value)
+
+        self.route = route
+        self.cell_position = cell_position
+
 class board:
     def __init__(self,problem):
         self.board = np.empty((9,9),dtype=cell)
@@ -61,6 +80,8 @@ class board:
             for j in range(9):
                 self.board[i][j] = cell(i,j,value = problem[i][j])
 
+        # This is a checkpoint of the differnt states the problem can have
+        self.checkpoints = []
 
     def horizontal_check(self,cell):
         # Checks the column
@@ -113,17 +134,10 @@ class board:
                     all_other_vals = all_other_vals.union(other_cell.possible_vals)
 
         diff_vals = cell.compare(all_other_vals)
-        # if cell.i == 4 and cell.j == 6:
-        #     print(all_other_vals)
-        #     print(cell.possible_vals)
-        #     print(diff_vals)
-        #     print(cell.i)
-        #     input(cell.j)
 
         if len(diff_vals) == 1:
             cell.value = list(diff_vals)[0]
             cell.possible_vals = diff_vals
-
 
     def check(self,cell):
         # Simply string all the checks together
@@ -134,14 +148,14 @@ class board:
         # Returns True if last possible number and False if it isn't
         return cell.check_last()
 
-
-    def display_vals(self):
+    def display_vals(self,board):
+        # Just displays the state of the board in a pretty way
 
         values = []
         for i in range(9):
             for j in range(9):
-                values.append(self.board[i][j].value)
-        board = """\
+                values.append(board[i][j].value)
+        mask = """\
 ┏━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┓
 ┃ %i ┊ %i ┊ %i ┃ %i ┊ %i ┊ %i ┃ %i ┊ %i ┊ %i ┃
 ┃ %i ┊ %i ┊ %i ┃ %i ┊ %i ┊ %i ┃ %i ┊ %i ┊ %i ┃
@@ -156,7 +170,7 @@ class board:
 ┃ %i ┊ %i ┊ %i ┃ %i ┊ %i ┊ %i ┃ %i ┊ %i ┊ %i ┃
 ┗━━━━━━━━━━━┻━━━━━━━━━━━┻━━━━━━━━━━━┛
 """%tuple(values)
-        return board
+        return mask
 
     def unsolved_cells(self):
         # Find the cells which need solving
@@ -169,52 +183,140 @@ class board:
 
         return investigate_cells
 
-    def solve(self):
+    def restore(self):
+        # This method restores the values of the board using the checkpoints
+        # Always take the latest copy of the checkpoint
+        point = self.checkpoints[-1]
+        for i in range(9):
+            for j in range(9):
+                self.board[i][j].value = point.values[9*i+j]
+                self.board[i][j].reset()
 
+        # There should be no changes in the values, just reset the possible
+        # values
+        self.reduce_state()
+
+    def choose_route(self, unsolved_cells):
+        # Choose the cell with the fewest possible values by sorting them by the
+        # length of their possible values
+        unsolved_cells.sort(key = lambda cell: len(cell.possible_vals))
+
+        # Then need to know if the state is valid i.e. all unsolved cells have
+        # possible values.
+        # If a wrong assumption is chosen we will have a cell with no possible
+        # values.
+        if len(unsolved_cells[0].possible_vals) == 0:
+            # when fail restore the list and choose an alternative route
+            self.restore()
+            # now we want to use the alternative route and remove the final
+            # checkpoint
+            # Delete the first route that failed
+            self.checkpoints[-1].route.pop(0)
+
+            # Then move to the previous level with a valid alternative route
+            while len(self.checkpoints[-1].route) == 0:
+                # Ultimate fail case, return to the previous level with a non
+                # zero path
+                self.checkpoints.pop()
+                self.checkpoints[-1].route.pop(0)
+                self.restore()
+
+        else:
+            # choose the next level and make the next assumption
+            # only need the smallest route
+            self.checkpoints.append(checkpoint(self.board,
+             list(unsolved_cells[0].possible_vals), unsolved_cells[0].pos))
+
+        # Make the assumption and set the value
+        assumed_cell_pos = self.checkpoints[-1].cell_position
+        assumed_cell = self.board[assumed_cell_pos[0], assumed_cell_pos[1]]
+        assumed_cell.value = self.checkpoints[-1].route[0]
+
+    def reduce_state(self):
+        # This will solve a single state of the system
+        # It will return the unsolved cells, if the solution is found there will
+        # be no unsolved cells.
+
+        # Generate the list of cells to investigate
         investigate_cells = self.unsolved_cells()
 
+        # Array keeps track of the length of the unsolved cells to tell if it's
+        # been stuck on a state for too long
         prev_lengths = np.array([0,0])
 
         while True:
             for num, cell in enumerate(investigate_cells):
-                # print(num)
+                # Check does all the imporant stuff
                 if self.check(cell):
-                    input(self.display_vals())
-                    investigate_cells = self.unsolved_cells()
+                    investigate_cells.remove(cell)
                     break
 
+            # First check if it solved the game
             if len(investigate_cells) == 0:
                 break
 
+            # In the first case does a unique check of remaining values
             elif len(investigate_cells) == prev_lengths[0] and len(investigate_cells) != prev_lengths[1]:
                 for num, cell in enumerate(investigate_cells):
+                    # Does the unique check for each cell
                     self.unique_check(cell)
+                    # True if the it has a value
                     if cell.check_last():
-                        input(self.display_vals())
+                        # input(self.display_vals(self.board))
                         investigate_cells.remove(cell)
                         break
 
+            # Finally breaks if there is a problem
             elif np.all(prev_lengths == len(investigate_cells)):
-                print([cell.possible_vals for cell in investigate_cells])
-                print(self.display_vals())
-                input("We have reached a problem")
+                # Erroneus board
+                # print("Error, the board has no solution")
+                break
 
             prev_lengths[1] = prev_lengths[0]
             prev_lengths[0] = len(investigate_cells)
 
-        val_board = self.display_vals()
-        return val_board
 
-problem = [[2, 8, 0, 4, 0, 9, 0, 0, 6],
-           [9, 0, 0, 3, 5, 0, 0, 0, 0],
-           [0, 0, 0, 0, 6, 0, 0, 4, 0],
-           [0, 0, 0, 0, 0, 0, 6, 0, 0],
-           [0, 3, 0, 7, 0, 2, 0, 5, 0],
-           [0, 0, 4, 0, 0, 0, 0, 0, 0],
-           [0, 1, 0, 0, 7, 0, 0, 0, 0],
-           [0, 0, 0, 0, 3, 6, 0, 0, 8],
-           [7, 0, 0, 8, 0, 1, 0, 3, 4]]
+        return investigate_cells
 
+    def solve(self):
+        # Loop through until solved
+        t0 = time.time()
+        while True:
+            unsolved_cells = self.reduce_state()
+            unsolved_cells.sort(key = lambda cell: len(cell.possible_vals))
+
+            if len(unsolved_cells) != 0:
+                self.choose_route(unsolved_cells)
+
+            else:
+                break
+
+        t1 = time.time()
+        delta_t = t1-t0
+        print("Computational time: %.3f s"%delta_t)
+        print("Assumptions made %i"%len(self.checkpoints))
+        return self.display_vals(self.board)
+
+problem = [[0, 0, 0, 6, 0, 0, 0, 0, 5],
+           [0, 0, 0, 0, 0, 4, 0, 3, 0],
+           [3, 0, 7, 0, 8, 0, 9, 0, 4],
+           [0, 0, 0, 9, 0, 0, 0, 2, 0],
+           [0, 8, 2, 0, 0, 0, 3, 5, 0],
+           [0, 5, 0, 0, 0, 1, 0, 0, 0],
+           [7, 0, 5, 0, 4, 0, 6, 0, 2],
+           [0, 9, 0, 7, 0, 0, 0, 0, 0],
+           [4, 0, 0, 0, 0, 9, 0, 0, 0]]
+'''
+problem = [[1, 0, 0, 0, 0, 0, 3, 0, 0],
+           [9, 3, 5, 0, 1, 0, 0, 0, 0],
+           [0, 0, 8, 7, 2, 0, 9, 0, 0],
+           [0, 6, 0, 2, 7, 0, 0, 0, 0],
+           [0, 0, 0, 0, 0, 0, 0, 0, 0],
+           [0, 0, 0, 0, 8, 6, 0, 5, 0],
+           [0, 0, 6, 0, 3, 2, 1, 0, 0],
+           [0, 0, 0, 0, 5, 0, 2, 4, 9],
+           [0, 0, 2, 0, 0, 0, 0, 0, 3],]
+'''
 
 def produce_problem():
     row_nums = [i for i in range(1,10)]
@@ -231,8 +333,9 @@ def produce_problem():
 
     return problem
 
-# problem = produce_problem()
+problem = produce_problem()
 board = board(problem)
+print(board.display_vals(board.board))
 solution = board.solve()
 print(solution)
 # ┏━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┓
